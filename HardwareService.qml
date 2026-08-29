@@ -5,7 +5,7 @@ import "Model.js" as Model
 
 // Shared background hardware polling service. Omarchy creates this once from
 // the manifest's service entry point, while every monitor's Panel.qml reads the
-// same instance through bar.shell.serviceFor("hardware-panel").
+// same instance through bar.shell.serviceFor("io.github.heyimhere.hardware-panel").
 Item {
   id: root
 
@@ -65,17 +65,17 @@ Item {
 
   function openPanel() {
     if (root.shell && typeof root.shell.summon === "function")
-      root.shell.summon("hardware-panel", "")
+      root.shell.summon("io.github.heyimhere.hardware-panel", "")
   }
 
   function closePanel() {
     if (root.shell && typeof root.shell.hide === "function")
-      root.shell.hide("hardware-panel")
+      root.shell.hide("io.github.heyimhere.hardware-panel")
   }
 
   function togglePanel() {
     if (root.shell && typeof root.shell.toggle === "function")
-      root.shell.toggle("hardware-panel", "")
+      root.shell.toggle("io.github.heyimhere.hardware-panel", "")
   }
 
   // Resolve the collector script relative to this file's own location, since
@@ -97,9 +97,9 @@ Item {
     if (signature === root._loggedWarningSignature) return
     root._loggedWarningSignature = signature
     if (nextWarnings.length > 0)
-      console.warn("hardware-panel collector:", nextWarnings.join("; "))
+      console.warn("io.github.heyimhere.hardware-panel collector:", nextWarnings.join("; "))
     else
-      console.info("hardware-panel collector recovered")
+      console.info("io.github.heyimhere.hardware-panel collector recovered")
   }
 
   function applySnapshot(rawText) {
@@ -191,14 +191,14 @@ Item {
     onTriggered: {
       if (collectProcess.running) {
         root.lastError = "Hardware collector timed out after " + Math.round(root.pollTimeoutMs / 1000) + " seconds"
-        console.warn("hardware-panel:", root.lastError)
+        console.warn("io.github.heyimhere.hardware-panel:", root.lastError)
         collectProcess.running = false
       }
     }
   }
 
   IpcHandler {
-    target: "hardware-panel"
+    target: "io.github.heyimhere.hardware-panel"
 
     function open(): void { root.openPanel() }
     function close(): void { root.closePanel() }

@@ -9,14 +9,14 @@ import qs.Commons
 // omarchy.tailscale (qs.Ui.Panel base + KeyboardPanel popup).
 Panel {
   id: root
-  moduleName: "hardware-panel"
-  ipcTarget: "hardware-panel"
+  moduleName: "io.github.heyimhere.hardware-panel"
+  ipcTarget: "io.github.heyimhere.hardware-panel"
   // The singleton HardwareService owns the IPC target and routes commands
   // through the shell to the appropriate live bar-widget instance.
   manageIpc: false
 
   readonly property var hardwareService: bar && bar.shell
-    ? bar.shell.serviceFor("hardware-panel") : null
+    ? bar.shell.serviceFor("io.github.heyimhere.hardware-panel") : null
   readonly property var gpus: hardwareService ? hardwareService.gpus : []
   readonly property var fans: hardwareService ? hardwareService.fans : []
   readonly property var barGpu: {

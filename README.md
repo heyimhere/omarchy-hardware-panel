@@ -17,9 +17,9 @@ unavailable without hiding the hardware that was successfully detected.
 
 ```sh
 git clone https://github.com/heyimhere/omarchy-hardware-panel.git ~/src/omarchy-hardware-panel
-ln -s ~/src/omarchy-hardware-panel ~/.config/omarchy/plugins/hardware-panel
+ln -s ~/src/omarchy-hardware-panel ~/.config/omarchy/plugins/io.github.heyimhere.hardware-panel
 omarchy-shell shell rescanPlugins
-omarchy plugin enable hardware-panel
+omarchy plugin enable io.github.heyimhere.hardware-panel
 ```
 
 **Published install:**
@@ -32,6 +32,12 @@ QML source changes are picked up automatically once a file watcher notices the e
 If a change doesn't seem to take effect, run `omarchy-restart-shell` to force a clean
 reload. Changes to `bin/omarchy-hardware-collect.sh` take effect on the very next poll
 tick with no restart needed, since it's a plain script the shell re-invokes each time.
+
+## Removal
+
+```sh
+omarchy plugin remove io.github.heyimhere.hardware-panel
+```
 
 ## Requirements
 
@@ -70,7 +76,7 @@ Run the collector directly and read its JSON output. This is exactly what
 `HardwareService.qml` parses every poll tick:
 
 ```sh
-bash ~/.config/omarchy/plugins/hardware-panel/bin/omarchy-hardware-collect.sh | jq .
+bash ~/.config/omarchy/plugins/io.github.heyimhere.hardware-panel/bin/omarchy-hardware-collect.sh | jq .
 ```
 
 Each top-level key tells you what was detected:
@@ -139,17 +145,18 @@ test/collector.test.sh      captured proc/sysfs and command fixtures for GPUs, f
 `HardwareService.qml` is a manifest `"service"` kind and Omarchy creates exactly one
 instance for the enabled plugin. Each monitor still gets its own lightweight bar
 widget and popup, but those widgets resolve the shared instance through
-`bar.shell.serviceFor("hardware-panel")`. This follows the shell's combined service
-and bar-widget architecture and prevents duplicate sensor polling on multi-monitor
-systems.
+`bar.shell.serviceFor("io.github.heyimhere.hardware-panel")`. This follows the
+shell's combined service and bar-widget architecture and prevents duplicate sensor
+polling on multi-monitor systems.
 
 The service reads Omarchy's installation timestamp once at startup through the
 collector's `--static-only` mode. Missing or malformed install metadata is silently
 omitted because it is cosmetic. An in-process timer updates the derived day count,
 while regular two-second hardware polls use `--dynamic-only` and never reread the log.
 
-The shared service also owns the single `hardware-panel` IPC target. Commands such as
-`omarchy-shell hardware-panel open`, `close`, and `toggle` route through Omarchy's
+The shared service also owns the single `io.github.heyimhere.hardware-panel` IPC target.
+Commands such as `omarchy-shell io.github.heyimhere.hardware-panel open`, `close`, and
+`toggle` route through Omarchy's
 bar-widget coordinator, preserving scripting and keybindings without registering a
 competing handler on every monitor.
 

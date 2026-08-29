@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "id": "hardware-panel",
+  "name": "Hardware Panel",
+  "version": "0.1.0",
+  "author": "Ray Silvers",
+  "license": "MIT",
+  "description": "CPU, GPU, memory, and fan monitoring in the Omarchy bar, with a click-through popup panel.",
+  "kinds": ["service", "bar-widget"],
+  "entryPoints": {
+    "service": "HardwareService.qml",
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Hardware Panel",
+    "description": "CPU/GPU utilization, temperatures, memory usage, and fan RPMs.",
+    "category": "System",
+    "aliases": ["hardware", "sensors"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 2
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 1,
+        "max": 30,
+        "step": 1,
+        "defaultValue": 2
+      }
+    ]
+  }
+}

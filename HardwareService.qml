@@ -19,6 +19,9 @@ Item {
   property real cpuPercent: -1 // -1 = unknown (no sample yet)
   property var cpuTempC: null // number or null
   property int cpuCoreCount: 0
+  // Collected once when the shared service starts, alongside osInstalledAtMs,
+  // since the CPU model never changes at runtime.
+  property var cpuName: null
   property var _prevCpuRaw: null
 
   // ---- GPU ----
@@ -221,6 +224,7 @@ Item {
       if (!parsed.ok) return
       var os = Model.normalizeOs(parsed.data.os)
       if (os) root.osInstalledAtMs = os.installedAtMs
+      root.cpuName = Model.normalizeCpuName(parsed.data.cpuName)
     }
   }
 

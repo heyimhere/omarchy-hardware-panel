@@ -21,7 +21,9 @@ THERMAL_ROOT="${THERMAL_ROOT:-/sys/class/thermal}"
 DRM_ROOT="${DRM_ROOT:-/sys/class/drm}"
 PROC_STAT_PATH="${PROC_STAT_PATH:-/proc/stat}"
 MEMINFO_PATH="${MEMINFO_PATH:-/proc/meminfo}"
+PROC_CPUINFO_PATH="${PROC_CPUINFO_PATH:-/proc/cpuinfo}"
 OMARCHY_INSTALL_LOG="${OMARCHY_INSTALL_LOG:-/var/log/omarchy-install.log}"
+ROOT_FS_PATH="${ROOT_FS_PATH:-/}"
 COLLECTOR_MODE="full"
 
 case "${1:-}" in
@@ -84,6 +86,13 @@ cpu_core_count() {
   local n
   n=$(nproc 2>/dev/null)
   [[ $n =~ ^[0-9]+$ ]] && echo "$n" || echo 0
+}
+
+# CPU model name, e.g. "AMD Ryzen 9 5900HX with Radeon Graphics". Doesn't
+# change at runtime, so it's collected once via --static-only rather than on
+# every poll. Empty if /proc/cpuinfo has no "model name" line.
+cpu_name() {
+  awk -F': *' '/^model name[[:space:]]*:/ { print $2; exit }' "$PROC_CPUINFO_PATH" 2>/dev/null | trim
 }
 
 # CPU temperature: discover by hwmon chip *name*, never a fixed hwmon index
@@ -190,26 +199,39 @@ mem_json() {
 # written once at install time and never rewritten, unlike the file's mtime
 # (which migrations/backups can change). Age-from-timestamp math happens in
 # Model.js, same as every other derived value here.
+#
+# Falls back to the root filesystem's birth time when the log is missing or
+# unreadable (e.g. rotated away, or an install method that never wrote it).
+# This is the same source Omarchy's own fastfetch "OS Age" module uses, so it
+# stays consistent with what a user already sees elsewhere on the system.
 # ---------------------------------------------------------------------------
 os_json() {
-  local ts epoch
-  [ -r "$OMARCHY_INSTALL_LOG" ] || return 1
+  local ts epoch birth
 
-  ts=$(sed -n '1s/.*Installation Started: \([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\} [0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}\).*/\1/p' \
-    "$OMARCHY_INSTALL_LOG" 2>/dev/null)
-  [ -n "$ts" ] || return 1
+  if [ -r "$OMARCHY_INSTALL_LOG" ]; then
+    ts=$(sed -n '1s/.*Installation Started: \([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\} [0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}\).*/\1/p' \
+      "$OMARCHY_INSTALL_LOG" 2>/dev/null)
+    if [ -n "$ts" ]; then
+      epoch=$(date -d "$ts" +%s 2>/dev/null)
+      if [[ $epoch =~ ^[0-9]+$ ]]; then
+        jq -n --argjson installedAtMs "$((epoch * 1000))" '{installedAtMs: $installedAtMs}'
+        return 0
+      fi
+    fi
+  fi
 
-  epoch=$(date -d "$ts" +%s 2>/dev/null)
-  [[ $epoch =~ ^[0-9]+$ ]] || return 1
-
-  jq -n --argjson installedAtMs "$((epoch * 1000))" '{installedAtMs: $installedAtMs}'
+  birth=$(stat -c %W "$ROOT_FS_PATH" 2>/dev/null)
+  [[ $birth =~ ^[0-9]+$ ]] && [ "$birth" -gt 0 ] || return 1
+  jq -n --argjson installedAtMs "$((birth * 1000))" '{installedAtMs: $installedAtMs}'
 }
 
 static_main() {
-  local os_obj
+  local os_obj cpu_name_val cpu_name_json
   os_obj=$(os_json)
   [ -n "$os_obj" ] || os_obj="null"
-  jq -n --argjson os "$os_obj" '{os: $os}'
+  cpu_name_val=$(cpu_name)
+  cpu_name_json=$([ -n "$cpu_name_val" ] && jq -n --arg n "$cpu_name_val" '$n' || echo "null")
+  jq -n --argjson os "$os_obj" --argjson cpuName "$cpu_name_json" '{os: $os, cpuName: $cpuName}'
 }
 
 # ---------------------------------------------------------------------------
@@ -519,7 +541,7 @@ gpus_json() {
 # ---------------------------------------------------------------------------
 main() {
   local cpu_raw mem_obj temp_c core_count temp_json warnings_json collected_at_ms
-  local gpu_obj gpus_arr gpu_warn_file line fans_arr os_obj
+  local gpu_obj gpus_arr gpu_warn_file line fans_arr os_obj cpu_name_val cpu_name_json
 
   cpu_raw=$(cpu_raw_json)
   if [ -z "$cpu_raw" ]; then
@@ -536,9 +558,12 @@ main() {
   core_count=$(cpu_core_count)
 
   os_obj="null"
+  cpu_name_json="null"
   if [ "$COLLECTOR_MODE" = "full" ]; then
     os_obj=$(os_json)
     [ -n "$os_obj" ] || os_obj="null"
+    cpu_name_val=$(cpu_name)
+    cpu_name_json=$([ -n "$cpu_name_val" ] && jq -n --arg n "$cpu_name_val" '$n' || echo "null")
   fi
 
   fans_arr=$(fans_json)
@@ -585,6 +610,7 @@ main() {
     --argjson collectedAtMs "$collected_at_ms" \
     --argjson gpus "$gpus_arr" \
     --argjson os "$os_obj" \
+    --argjson cpuName "$cpu_name_json" \
     --argjson includeOs "$([ "$COLLECTOR_MODE" = "full" ] && echo true || echo false)" \
     '{
       cpu: { raw: $cpuRaw, coreCount: $coreCount, tempC: $cpuTempC },
@@ -593,7 +619,7 @@ main() {
       memory: $memory,
       fans: $fans,
       meta: { collectedAtMs: $collectedAtMs, warnings: $warnings }
-    } | if $includeOs then . + {os: $os} else . end'
+    } | if $includeOs then . + {os: $os, cpuName: $cpuName} else . end'
 }
 
 if [ "$COLLECTOR_MODE" = "static" ]; then

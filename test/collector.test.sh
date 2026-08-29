@@ -31,6 +31,7 @@ mkdir -p \
 
 printf 'cpu  100 0 50 850 0 0 0 0 0 0\n' >"$FIXTURE_DIR/proc/stat"
 printf 'MemTotal:       33554432 kB\nMemAvailable:   20971520 kB\n' >"$FIXTURE_DIR/proc/meminfo"
+printf 'processor\t: 0\nvendor_id\t: AuthenticAMD\nmodel name\t: AMD Ryzen 9 5900HX with Radeon Graphics\n' >"$FIXTURE_DIR/proc/cpuinfo"
 printf '=== Omarchy Installation Started: 2024-01-01 00:00:00 ===\n' >"$FIXTURE_DIR/omarchy-install.log"
 
 printf 'k10temp\n' >"$FIXTURE_DIR/hwmon/hwmon7/name"
@@ -64,7 +65,13 @@ printf '%s\n' \
   '#!/bin/bash' \
   'printf '\''{"nct6798-isa-0000":{"Chassis":{"fan2_input":760}}}\n'\''' \
   >"$FIXTURE_DIR/bin/sensors"
-chmod +x "$FIXTURE_DIR/bin/nvidia-smi" "$FIXTURE_DIR/bin/lspci" "$FIXTURE_DIR/bin/sensors"
+printf '%s\n' \
+  '#!/bin/bash' \
+  '[ "$#" -eq 3 ] && [ "$1" = "-c" ] && [ "$2" = "%W" ] || exit 2' \
+  '[ -e "$3" ] || exit 1' \
+  'printf "1700000000\n"' \
+  >"$FIXTURE_DIR/bin/stat"
+chmod +x "$FIXTURE_DIR/bin/nvidia-smi" "$FIXTURE_DIR/bin/lspci" "$FIXTURE_DIR/bin/sensors" "$FIXTURE_DIR/bin/stat"
 
 run_collector() {
   PATH="$FIXTURE_DIR/bin:/usr/bin:/bin" \
@@ -73,7 +80,9 @@ run_collector() {
   DRM_ROOT="$FIXTURE_DIR/drm" \
   PROC_STAT_PATH="$FIXTURE_DIR/proc/stat" \
   MEMINFO_PATH="$FIXTURE_DIR/proc/meminfo" \
+  PROC_CPUINFO_PATH="$FIXTURE_DIR/proc/cpuinfo" \
   OMARCHY_INSTALL_LOG="$FIXTURE_DIR/omarchy-install.log" \
+  ROOT_FS_PATH="${ROOT_FS_PATH_OVERRIDE:-$FIXTURE_DIR}" \
     "$PROJECT_DIR/bin/omarchy-hardware-collect.sh" "$@"
 }
 
@@ -89,18 +98,30 @@ assert_jq "$SNAPSHOT" '.gpu == .gpus[0]' "legacy preferred GPU field retained"
 
 expected_install_ms=$(( $(date -d "2024-01-01 00:00:00" +%s) * 1000 ))
 assert_jq "$SNAPSHOT" ".os.installedAtMs == $expected_install_ms" "install date parsed from install log fixture"
+assert_jq "$SNAPSHOT" '.cpuName == "AMD Ryzen 9 5900HX with Radeon Graphics"' "CPU name parsed from cpuinfo fixture"
 
 rm -f "$FIXTURE_DIR/omarchy-install.log"
 run_collector >"$SNAPSHOT"
-assert_jq "$SNAPSHOT" '.os == null' "missing install log degrades to null, not a crash"
+assert_jq "$SNAPSHOT" '.os.installedAtMs == 1700000000000' "missing install log falls back to filesystem birth time"
 assert_jq "$SNAPSHOT" '.meta.warnings | all(contains("install date") | not)' "missing install log stays silent"
+
+ROOT_FS_PATH_OVERRIDE="$FIXTURE_DIR/no-such-path" run_collector >"$SNAPSHOT"
+assert_jq "$SNAPSHOT" '.os == null' "missing install log and unreadable root fs degrades to null, not a crash"
+unset ROOT_FS_PATH_OVERRIDE
 printf '=== Omarchy Installation Started: 2024-01-01 00:00:00 ===\n' >"$FIXTURE_DIR/omarchy-install.log"
 
+printf 'processor\t: 0\nvendor_id\t: AuthenticAMD\n' >"$FIXTURE_DIR/proc/cpuinfo"
+run_collector >"$SNAPSHOT"
+assert_jq "$SNAPSHOT" '.cpuName == null' "missing model name line degrades to null, not a crash"
+assert_jq "$SNAPSHOT" '.meta.warnings | all(contains("cpu name") | not)' "missing model name stays silent"
+printf 'processor\t: 0\nvendor_id\t: AuthenticAMD\nmodel name\t: AMD Ryzen 9 5900HX with Radeon Graphics\n' >"$FIXTURE_DIR/proc/cpuinfo"
+
 run_collector --static-only >"$SNAPSHOT"
-assert_jq "$SNAPSHOT" ".os.installedAtMs == $expected_install_ms and (keys == [\"os\"])" "static-only mode returns only install metadata"
+assert_jq "$SNAPSHOT" ".os.installedAtMs == $expected_install_ms and .cpuName == \"AMD Ryzen 9 5900HX with Radeon Graphics\" and (keys == [\"cpuName\", \"os\"])" "static-only mode returns install metadata and cpu name"
 
 run_collector --dynamic-only >"$SNAPSHOT"
 assert_jq "$SNAPSHOT" 'has("os") | not' "dynamic-only mode omits install metadata"
+assert_jq "$SNAPSHOT" 'has("cpuName") | not' "dynamic-only mode omits cpu name"
 
 printf '%s\n' '#!/bin/bash' 'exit 9' >"$FIXTURE_DIR/bin/nvidia-smi"
 chmod +x "$FIXTURE_DIR/bin/nvidia-smi"

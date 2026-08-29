@@ -75,7 +75,7 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(320))
-    contentHeight: panel.fittedContentHeight(col.implicitHeight, Style.space(480))
+    contentHeight: panel.fittedContentHeight(col.implicitHeight, Style.space(560))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -132,6 +132,16 @@ Panel {
               text: "CPU"
               foreground: root.bar.foreground
               fontFamily: root.bar.fontFamily
+            }
+
+            Text {
+              width: parent.width
+              visible: hardwareService && !!hardwareService.cpuName
+              text: hardwareService ? hardwareService.cpuName : ""
+              color: Qt.darker(root.bar.foreground, 1.4)
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideRight
             }
 
             Row {

@@ -132,6 +132,13 @@ function normalizeOs(raw) {
   return { installedAtMs: raw.installedAtMs }
 }
 
+// Normalizes the raw cpuName field from the collector into a non-empty
+// string, or null if missing/malformed. Collected once via --static-only
+// since the CPU model never changes at runtime.
+function normalizeCpuName(raw) {
+  return typeof raw === "string" && raw !== "" ? raw : null
+}
+
 // Whole days since installedAtMs. nowMs defaults to Date.now() when omitted
 // (the QML call site), but can be passed explicitly for deterministic tests.
 function osAgeDays(installedAtMs, nowMs) {
@@ -175,6 +182,7 @@ if (typeof module !== "undefined") {
     normalizeFans: normalizeFans,
     normalizeWarnings: normalizeWarnings,
     normalizeOs: normalizeOs,
+    normalizeCpuName: normalizeCpuName,
     osAgeDays: osAgeDays,
     kbToGB: kbToGB,
     memPercent: memPercent,

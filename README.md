@@ -14,7 +14,7 @@ unavailable without hiding the hardware that was successfully detected.
 **Local development** (symlink, so edits take effect immediately):
 
 ```sh
-git clone <this-repo-url> ~/src/omarchy-hardware-panel
+git clone https://github.com/heyimhere/omarchy-hardware-panel.git ~/src/omarchy-hardware-panel
 ln -s ~/src/omarchy-hardware-panel ~/.config/omarchy/plugins/hardware-panel
 omarchy-shell shell rescanPlugins
 omarchy plugin enable hardware-panel
@@ -23,7 +23,7 @@ omarchy plugin enable hardware-panel
 **Published install:**
 
 ```sh
-omarchy plugin add <this-repo-url> --enable
+omarchy plugin add https://github.com/heyimhere/omarchy-hardware-panel.git --enable
 ```
 
 QML source changes are picked up automatically once a file watcher notices the edit.

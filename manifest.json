@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "hardware-panel",
   "name": "Hardware Panel",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "Ray Silvers",
   "license": "MIT",
   "description": "CPU, GPU, memory, and fan monitoring in the Omarchy bar, with a click-through popup panel.",

@@ -117,6 +117,13 @@ assertEqual(Model.normalizeOs({ installedAtMs: 0 }), null, "normalizeOs: zero ti
 assertEqual(Model.normalizeOs({ installedAtMs: -5 }), null, "normalizeOs: negative timestamp is null")
 assertEqual(Model.normalizeOs({ installedAtMs: 1000 }), { installedAtMs: 1000 }, "normalizeOs: valid timestamp preserved")
 
+// ---- normalizeCpuName ----
+assertEqual(Model.normalizeCpuName(null), null, "normalizeCpuName: null input is null")
+assertEqual(Model.normalizeCpuName(undefined), null, "normalizeCpuName: undefined input is null")
+assertEqual(Model.normalizeCpuName(""), null, "normalizeCpuName: empty string is null")
+assertEqual(Model.normalizeCpuName(42), null, "normalizeCpuName: non-string coerced to null")
+assertEqual(Model.normalizeCpuName("AMD Ryzen 9 5900HX"), "AMD Ryzen 9 5900HX", "normalizeCpuName: valid string preserved")
+
 const dayMs = 86400000
 assertEqual(Model.osAgeDays(1000, 1000), 0, "osAgeDays: installed just now is 0 days")
 assertEqual(Model.osAgeDays(0, dayMs * 5), 5, "osAgeDays: exactly 5 days later")

@@ -9,6 +9,8 @@ It never assumes a specific machine. CPU temperature, every supported GPU, and f
 sensors are detected at runtime. Metrics that are not present are omitted or shown as
 unavailable without hiding the hardware that was successfully detected.
 
+![Hardware Panel popup showing CPU, GPU, memory, and fan metrics](screenshots/hardware-panel.png)
+
 ## Installation
 
 **Local development** (symlink, so edits take effect immediately):
@@ -80,10 +82,16 @@ Each top-level key tells you what was detected:
   It is `null` only when no supported GPU was detected under `/sys/class/drm`.
 - `fans`: `[]` means no `fan*_input` files exist under `/sys/class/hwmon`.
 - `os`: `{ "installedAtMs": ... }` parsed from the first line of
-  `/var/log/omarchy-install.log`, or `null` if that log is missing or unreadable.
-  Shown as a subtitle line ("Installed 118 days") under the panel's title.
-- `meta.warnings`: a plain-English reason for anything above that came back
-  null/empty.
+  `/var/log/omarchy-install.log`, falling back to the root filesystem's birth
+  time (`stat -c %W /`, the same source Omarchy's own fastfetch "OS Age"
+  module uses) if that log is missing or unreadable. `null` only if neither
+  source is available. Shown as a subtitle line ("Installed 118 days") under
+  the panel's title.
+- `cpuName`: the CPU model name from `/proc/cpuinfo`, or `null` if that field
+  is absent. Collected once via `--static-only`, like `os`, since it never
+  changes at runtime.
+- `meta.warnings`: plain-English diagnostics for actionable dynamic collection
+  failures. Missing cosmetic metadata such as `os` or `cpuName` stays silent.
 
 Example output on the machine this plugin was developed on (NVIDIA desktop, no
 exposed fan sensors):
@@ -102,13 +110,15 @@ exposed fan sensors):
   "memory": { "totalKB": 49231812, "availableKB": 41575560 },
   "fans": [],
   "os": { "installedAtMs": 1777778657000 },
+  "cpuName": "AMD Ryzen 9 5900X 12-Core Processor",
   "meta": { "collectedAtMs": 1787982983547, "warnings": [] }
 }
 ```
 
 You can also point the collector at captured files for offline debugging. It supports
-`HWMON_ROOT`, `THERMAL_ROOT`, `DRM_ROOT`, `PROC_STAT_PATH`, `MEMINFO_PATH`, and
-`OMARCHY_INSTALL_LOG`. For example: `HWMON_ROOT=/path/to/snapshot/sys/class/hwmon bash
+`HWMON_ROOT`, `THERMAL_ROOT`, `DRM_ROOT`, `PROC_STAT_PATH`, `MEMINFO_PATH`,
+`PROC_CPUINFO_PATH`, `OMARCHY_INSTALL_LOG`, and `ROOT_FS_PATH`. For example:
+`HWMON_ROOT=/path/to/snapshot/sys/class/hwmon bash
 bin/omarchy-hardware-collect.sh`.
 
 ## Plugin architecture

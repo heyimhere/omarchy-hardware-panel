@@ -14,6 +14,15 @@ Item {
   property var shell: null
   property int refreshIntervalSec: 2
   readonly property int pollTimeoutMs: Math.max(10000, refreshIntervalSec * 3000)
+  readonly property int staticTimeoutMs: 10000
+
+  // Producer-side byte caps in the collector script keep real snapshots well
+  // under this, so it's only ever hit by a runaway/malfunctioning collector;
+  // treated the same as a timeout (see killProcessGroup below). QProcess's
+  // own read buffer is checked after each incoming chunk, keeping any overrun
+  // to the size of one QProcess read.
+  readonly property int maxCollectedBytes: 1048576
+  readonly property int maxCollectedStderrBytes: 262144
 
   // ---- CPU ----
   property real cpuPercent: -1 // -1 = unknown (no sample yet)
@@ -85,10 +94,41 @@ Item {
   readonly property string scriptPath: decodeURIComponent(
     String(Qt.resolvedUrl("bin/omarchy-hardware-collect.sh")).replace(/^file:\/\//, ""))
 
+  // Set by the watchdog-timeout and stdout-overflow handlers below so
+  // onExited (which fires asynchronously afterward once the killed process
+  // is actually reaped) doesn't clobber their specific message with its own
+  // generic "Collector exited <code>" one.
+  property bool _dynamicKillReported: false
+  property bool _staticKillReported: false
+
   function refresh() {
     if (collectProcess.running) return
+    root._dynamicKillReported = false
     collectProcess.running = true
     pollWatchdog.restart()
+  }
+
+  // Both collector Processes below run under `setsid`, giving each its own
+  // session and initial process group distinct from Quickshell's. GNU timeout
+  // may create a subordinate process group for a helper, so kill both the
+  // initial negative PGID and every process in the dedicated session. This
+  // covers the shell, timeout, the hardware helper, and its descendants.
+  function killProcessGroup(proc) {
+    var pid = Number(proc.processId)
+    if (proc.running && isFinite(pid) && pid > 1) {
+      Quickshell.execDetached(["kill", "-KILL", "--", "-" + Math.floor(pid)])
+      Quickshell.execDetached(["pkill", "-KILL", "-s", String(Math.floor(pid))])
+    }
+    proc.running = false
+  }
+
+  function collectedByteLength(collector) {
+    var bytes = collector.data
+    if (bytes && typeof bytes.byteLength === "number") return bytes.byteLength
+    // Compatibility fallback for a Quickshell build that exposes QByteArray
+    // differently. Four bytes per UTF-16 code unit is deliberately
+    // conservative, so a fallback can terminate early but never undercount.
+    return String(collector.text || "").length * 4
   }
 
   function updateDiagnostics(nextWarnings) {
@@ -172,6 +212,23 @@ Item {
   }
 
   Timer {
+    // Static metadata is collected only once, but it invokes helpers too and
+    // must not be allowed to leave a stuck process tree behind at startup.
+    id: staticWatchdog
+    interval: root.staticTimeoutMs
+    repeat: false
+    running: false
+    onTriggered: {
+      if (staticProcess.running) {
+        root._staticKillReported = true
+        root.lastError = "Static hardware collector timed out after " + Math.round(root.staticTimeoutMs / 1000) + " seconds"
+        console.warn("io.github.heyimhere.hardware-panel:", root.lastError)
+        root.killProcessGroup(staticProcess)
+      }
+    }
+  }
+
+  Timer {
     // Checking the clock is cheap and keeps the label current if the shell
     // remains running across the next age boundary.
     interval: 3600000
@@ -190,9 +247,10 @@ Item {
     running: false
     onTriggered: {
       if (collectProcess.running) {
+        root._dynamicKillReported = true
         root.lastError = "Hardware collector timed out after " + Math.round(root.pollTimeoutMs / 1000) + " seconds"
         console.warn("io.github.heyimhere.hardware-panel:", root.lastError)
-        collectProcess.running = false
+        root.killProcessGroup(collectProcess)
       }
     }
   }
@@ -207,19 +265,52 @@ Item {
     function toggle(): void { root.togglePanel() }
   }
 
+  // `setsid` puts each collection in its own session/process group; --wait
+  // preserves the script's exit status. With QProcess's normal fork/exec
+  // launch, the tracked pid is both the new session and process-group id.
+  // See killProcessGroup() above for complete descendant cleanup.
   Process {
     id: staticProcess
     running: true
-    command: [root.scriptPath, "--static-only"]
+    command: ["setsid", "--wait", root.scriptPath, "--static-only"]
+    onStarted: {
+      root._staticKillReported = false
+      staticWatchdog.restart()
+    }
     stdout: StdioCollector {
       id: staticStdout
-      waitForEnd: true
+      waitForEnd: false
+      onDataChanged: {
+        if (staticProcess.running && root.collectedByteLength(staticStdout) > root.maxCollectedBytes) {
+          root._staticKillReported = true
+          root.lastError = "Static hardware collector output exceeded " + root.maxCollectedBytes + " bytes"
+          console.warn("io.github.heyimhere.hardware-panel: static collector output exceeded", root.maxCollectedBytes, "bytes, terminating")
+          root.killProcessGroup(staticProcess)
+        }
+      }
     }
     stderr: StdioCollector {
-      waitForEnd: true
+      id: staticStderr
+      waitForEnd: false
+      onDataChanged: {
+        if (staticProcess.running && root.collectedByteLength(staticStderr) > root.maxCollectedStderrBytes) {
+          root._staticKillReported = true
+          root.lastError = "Static hardware collector stderr exceeded " + root.maxCollectedStderrBytes + " bytes"
+          console.warn("io.github.heyimhere.hardware-panel:", root.lastError)
+          root.killProcessGroup(staticProcess)
+        }
+      }
     }
+    // Best-effort teardown cleanup: Quickshell's Process destructor SIGKILLs
+    // only its immediate child, and `setsid` deliberately places the collector
+    // outside Quickshell's session, so a reload mid-collection would otherwise
+    // orphan what the script spawned. This runs on engine-driven destruction
+    // (config reload); an abrupt process death cannot run QML handlers at all,
+    // which is safe here because every helper is already `timeout`-bounded.
+    Component.onDestruction: root.killProcessGroup(staticProcess)
     onExited: function (exitCode) {
-      if (exitCode !== 0) return
+      staticWatchdog.stop()
+      if (exitCode !== 0 || root._staticKillReported) return
       var parsed = Model.parseSnapshot(String(staticStdout.text || ""))
       if (!parsed.ok) return
       var os = Model.normalizeOs(parsed.data.os)
@@ -231,20 +322,42 @@ Item {
   Process {
     id: collectProcess
     running: false
-    command: [root.scriptPath, "--dynamic-only"]
+    command: ["setsid", "--wait", root.scriptPath, "--dynamic-only"]
     stdout: StdioCollector {
       id: collectStdout
-      waitForEnd: true
+      // false so overflow can be observed and acted on mid-stream; the
+      // collector script already caps its output well under maxCollectedBytes,
+      // so this only ever fires against a runaway/malfunctioning collector.
+      waitForEnd: false
+      onDataChanged: {
+        if (collectProcess.running && root.collectedByteLength(collectStdout) > root.maxCollectedBytes) {
+          root._dynamicKillReported = true
+          root.lastError = "Hardware collector output exceeded " + root.maxCollectedBytes + " bytes"
+          console.warn("io.github.heyimhere.hardware-panel:", root.lastError)
+          root.killProcessGroup(collectProcess)
+        }
+      }
     }
     stderr: StdioCollector {
       id: collectStderr
-      waitForEnd: true
+      waitForEnd: false
+      onDataChanged: {
+        if (collectProcess.running && root.collectedByteLength(collectStderr) > root.maxCollectedStderrBytes) {
+          root._dynamicKillReported = true
+          root.lastError = "Hardware collector stderr exceeded " + root.maxCollectedStderrBytes + " bytes"
+          console.warn("io.github.heyimhere.hardware-panel:", root.lastError)
+          root.killProcessGroup(collectProcess)
+        }
+      }
     }
+    // See staticProcess above: best-effort reload cleanup, since the destructor
+    // alone leaves descendants of an in-flight poll outside Quickshell's session.
+    Component.onDestruction: root.killProcessGroup(collectProcess)
     onExited: function (exitCode) {
       pollWatchdog.stop()
       if (exitCode === 0) {
         root.applySnapshot(String(collectStdout.text || ""))
-      } else {
+      } else if (!root._dynamicKillReported) {
         var stderrText = String(collectStderr.text || "").trim()
         root.lastError = "Collector exited " + exitCode + (stderrText ? ": " + stderrText : "")
       }

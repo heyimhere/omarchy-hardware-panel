@@ -41,8 +41,10 @@ omarchy plugin remove io.github.heyimhere.hardware-panel
 
 ## Requirements
 
-- `bash`, `jq`, and standard coreutils (`awk`, `find`, `sort`, `mktemp`, `timeout`),
-  all already present on an Omarchy install.
+- `bash` 5.1+ (the collector's process-group cleanup uses `wait -n -p`), `jq`, and
+  standard coreutils (`awk`, `find`, `sort`, `mktemp`, `timeout`), plus `setsid`,
+  `kill`, and `pkill` from util-linux/procps, all already present on an Omarchy
+  install.
 - No root access is ever required, for any metric.
 
 ## Supported hardware
@@ -139,7 +141,8 @@ Model.js                    pure parsing/math (CPU delta %, GPU/fan normalizatio
 bin/omarchy-hardware-collect.sh   the only thing that touches /proc, /sys, and
                              external tools; prints one JSON object per run
 test/collector.test.sh      captured proc/sysfs and command fixtures for GPUs, fans,
-                             partial metrics, and command failures
+                             partial metrics, command failures, producer caps, bounded
+                             enumeration, and oversized-JSON fallback behavior
 ```
 
 `HardwareService.qml` is a manifest `"service"` kind and Omarchy creates exactly one
@@ -161,12 +164,34 @@ bar-widget coordinator, preserving scripting and keybindings without registering
 competing handler on every monitor.
 
 **Reliability**: every optional external command (`nvidia-smi`, `sensors`, `lspci`) is
-wrapped in a 3-second `timeout`. If `timeout` itself is missing, those optional tools
-are skipped rather than run unbounded. `/proc` and `/sys` reads are plain files. A
-one-shot QML watchdog starts with each collection and is stopped when that exact
-process exits, so it cannot accidentally terminate a newer poll. Malformed fields do
-not replace last-known-good CPU or memory state. Collector warnings are logged only
-when their content changes, which keeps diagnostics useful without flooding the log.
+wrapped in a 3-second `timeout`, and its captured output is separately capped at 64KiB
+regardless of how quickly it's produced, since `timeout` only bounds wall-clock time,
+not volume. If `timeout` itself is missing, those optional tools are skipped rather
+than run unbounded, while the `/proc` and `/sys` derived CPU, temperature, and memory
+data is still collected and returned normally. Each hardware helper and captured local
+JSON producer runs in its own process group and streams into a 64KiB-plus-one-byte
+bounded file, so even a one-byte overflow is rejected without first entering a shell
+variable. On overflow or timeout the complete producer group is killed and reaped;
+the group is also swept after a successful exit so a forked descendant cannot survive
+by outliving its parent. Fan and GPU enumeration is capped on the producer side before
+sorting or loop processing (128 returned fans, 32 GPU cards, and at most 256 device
+candidates), and every string or numeric device attribute is capped as it is read. The
+final JSON producer streams into a 1MiB-plus-one-byte bounded file, then is
+status-checked and parsed before printing. An overflow, timeout, producer failure, or
+invalid result emits a small known-valid snapshot without first buffering the oversized
+JSON in the shell.
+
+Both collector invocations run under `setsid` so each gets its own process group,
+separate from Quickshell's. Independent one-shot QML watchdogs cover both the startup
+metadata collector and every dynamic poll. Each watchdog is stopped when its exact
+process exits, so it cannot accidentally terminate a newer poll; on a timeout, or if
+a collector's stdout/stderr somehow exceeds its byte cap, the *entire process group*
+is sent `SIGKILL`, and every process in the collector's dedicated session is killed
+as well. This also catches the subordinate process group GNU `timeout` creates, so a
+wedged helper cannot outlive the collector as an orphan. Malformed fields do not
+replace last-known-good CPU or memory state.
+Collector warnings are logged only when their content changes, which keeps diagnostics
+useful without flooding the log.
 
 Refresh interval defaults to 2 seconds and is user-configurable (1 to 30 seconds) via
 the widget's settings (`refreshIntervalSec` in the manifest's `barWidget.schema`).

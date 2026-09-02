@@ -18,6 +18,29 @@ assert_jq() {
   fi
 }
 
+assert_true() {
+  local label="$1"
+  shift
+  if "$@"; then
+    printf 'ok - %s\n' "$label"
+  else
+    printf 'FAIL: %s\n' "$label" >&2
+    failures=$((failures + 1))
+  fi
+}
+
+pid_file_process_is_gone() {
+  local pid_file="$1" pid attempt
+  [ -s "$pid_file" ] || return 1
+  pid=$(head -n1 "$pid_file")
+  [[ $pid =~ ^[0-9]+$ ]] || return 1
+  for attempt in {1..40}; do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 0.05
+  done
+  return 1
+}
+
 mkdir -p \
   "$FIXTURE_DIR/bin" \
   "$FIXTURE_DIR/proc" \
@@ -74,7 +97,8 @@ printf '%s\n' \
 chmod +x "$FIXTURE_DIR/bin/nvidia-smi" "$FIXTURE_DIR/bin/lspci" "$FIXTURE_DIR/bin/sensors" "$FIXTURE_DIR/bin/stat"
 
 run_collector() {
-  PATH="$FIXTURE_DIR/bin:/usr/bin:/bin" \
+  PATH="${PATH_OVERRIDE:-$FIXTURE_DIR/bin:/usr/bin:/bin}" \
+  HELPER_PID_FILE="${HELPER_PID_FILE:-}" \
   HWMON_ROOT="$FIXTURE_DIR/hwmon" \
   THERMAL_ROOT="$FIXTURE_DIR/thermal" \
   DRM_ROOT="$FIXTURE_DIR/drm" \
@@ -119,6 +143,15 @@ printf 'processor\t: 0\nvendor_id\t: AuthenticAMD\nmodel name\t: AMD Ryzen 9 590
 run_collector --static-only >"$SNAPSHOT"
 assert_jq "$SNAPSHOT" ".os.installedAtMs == $expected_install_ms and .cpuName == \"AMD Ryzen 9 5900HX with Radeon Graphics\" and (keys == [\"cpuName\", \"os\"])" "static-only mode returns install metadata and cpu name"
 
+{
+  printf 'model name\t: '
+  head -c 4096 /dev/zero | tr '\0' C
+  printf '\n'
+} >"$FIXTURE_DIR/proc/cpuinfo"
+run_collector --static-only >"$SNAPSHOT"
+assert_jq "$SNAPSHOT" '.cpuName | utf8bytelength == 256' "static CPU name is producer-capped to 256 bytes"
+printf 'processor\t: 0\nvendor_id\t: AuthenticAMD\nmodel name\t: AMD Ryzen 9 5900HX with Radeon Graphics\n' >"$FIXTURE_DIR/proc/cpuinfo"
+
 run_collector --dynamic-only >"$SNAPSHOT"
 assert_jq "$SNAPSHOT" 'has("os") | not' "dynamic-only mode omits install metadata"
 assert_jq "$SNAPSHOT" 'has("cpuName") | not' "dynamic-only mode omits cpu name"
@@ -129,6 +162,198 @@ run_collector >"$SNAPSHOT"
 assert_jq "$SNAPSHOT" '.gpus | length == 2' "command failure does not discard detected GPUs"
 assert_jq "$SNAPSHOT" '.gpus[0].vendor == "nvidia" and .gpus[0].utilPercent == null' "failed NVIDIA metrics degrade to nullable fields"
 assert_jq "$SNAPSHOT" '.meta.warnings | any(contains("nvidia-smi failed"))' "command failure produces a diagnostic warning"
+
+# A one-byte overflow is small enough for a producer to exit successfully
+# before its pipe closes. The collector must detect it by size, not rely on
+# SIGPIPE or the producer's exit status.
+printf '%s\n' \
+  '#!/bin/bash' \
+  'sleep 30 </dev/null >/dev/null 2>&1 &' \
+  'child=$!' \
+  '[ -n "${HELPER_PID_FILE:-}" ] && printf "%s\n" "$child" >"$HELPER_PID_FILE"' \
+  'head -c 65537 /dev/zero | tr '\''\0'\'' X' \
+  >"$FIXTURE_DIR/bin/nvidia-smi"
+chmod +x "$FIXTURE_DIR/bin/nvidia-smi"
+OVERFLOW_CHILD_PID="$FIXTURE_DIR/overflow-child.pid"
+HELPER_PID_FILE="$OVERFLOW_CHILD_PID" run_collector --dynamic-only >"$SNAPSHOT"
+assert_jq "$SNAPSHOT" '.gpus[0].vendor == "nvidia" and .gpus[0].utilPercent == null' "one-byte command overflow is rejected"
+assert_jq "$SNAPSHOT" '.meta.warnings | any(contains("nvidia-smi failed"))' "command overflow produces a diagnostic warning"
+assert_true "command overflow kills and reaps the helper process group" \
+  pid_file_process_is_gone "$OVERFLOW_CHILD_PID"
+
+# A timed-out producer is subject to the same complete-group cleanup. The
+# child deliberately has no output descriptor, so this also proves cleanup is
+# not merely an incidental SIGPIPE from the bounded reader.
+printf '%s\n' \
+  '#!/bin/bash' \
+  'sleep 30 </dev/null >/dev/null 2>&1 &' \
+  'child=$!' \
+  '[ -n "${HELPER_PID_FILE:-}" ] && printf "%s\n" "$child" >"$HELPER_PID_FILE"' \
+  'wait "$child"' \
+  >"$FIXTURE_DIR/bin/nvidia-smi"
+chmod +x "$FIXTURE_DIR/bin/nvidia-smi"
+TIMEOUT_CHILD_PID="$FIXTURE_DIR/timeout-child.pid"
+HELPER_PID_FILE="$TIMEOUT_CHILD_PID" run_collector --dynamic-only >"$SNAPSHOT"
+assert_jq "$SNAPSHOT" '.meta.warnings | any(contains("nvidia-smi failed"))' \
+  "command timeout produces a diagnostic warning"
+assert_true "command timeout kills and reaps the helper process group" \
+  pid_file_process_is_gone "$TIMEOUT_CHILD_PID"
+
+# Restore a normal NVIDIA result for the remaining fixture cases.
+printf '%s\n' \
+  '#!/bin/bash' \
+  'printf "0, 00000000:01:00.0, Test NVIDIA, 37, N/A, N/A, 512, 8192\\n"' \
+  >"$FIXTURE_DIR/bin/nvidia-smi"
+chmod +x "$FIXTURE_DIR/bin/nvidia-smi"
+
+# Strings from device attributes are capped at read time, before they become
+# shell variables or jq arguments.
+head -c 4096 /dev/zero | tr '\0' L >"$FIXTURE_DIR/hwmon/hwmon9/fan1_label"
+run_collector --dynamic-only >"$SNAPSHOT"
+assert_jq "$SNAPSHOT" '.fans[0].label | utf8bytelength == 256' "device label is producer-capped to 256 bytes"
+printf 'CPU Fan\n' >"$FIXTURE_DIR/hwmon/hwmon9/fan1_label"
+
+# Enumeration limits count candidates and sit upstream of result assembly.
+mkdir -p "$FIXTURE_DIR/hwmon/hwmon10"
+printf 'synthetic\n' >"$FIXTURE_DIR/hwmon/hwmon10/name"
+for n in $(seq 1 140); do
+  printf '%s\n' "$((1000 + n))" >"$FIXTURE_DIR/hwmon/hwmon10/fan${n}_input"
+done
+run_collector --dynamic-only >"$SNAPSHOT"
+assert_jq "$SNAPSHOT" '.fans | length == 128' "fan result count is capped"
+rm -rf "$FIXTURE_DIR/hwmon/hwmon10"
+
+# Exercise GPU count and bounded device-name output together.
+printf '%s\n' \
+  '#!/bin/bash' \
+  'printf "00:00.0 VGA compatible controller: Synthetic "' \
+  'head -c 4096 /dev/zero | tr '\''\0'\'' G' \
+  'printf "\\n"' \
+  >"$FIXTURE_DIR/bin/lspci"
+chmod +x "$FIXTURE_DIR/bin/lspci"
+for n in $(seq 2 41); do
+  hex=$(printf '%02x' "$n")
+  mkdir -p "$FIXTURE_DIR/drm/card$n" "$FIXTURE_DIR/pci/0000:02:$hex.0"
+  printf '0x1002\n' >"$FIXTURE_DIR/pci/0000:02:$hex.0/vendor"
+  ln -s "../../pci/0000:02:$hex.0" "$FIXTURE_DIR/drm/card$n/device"
+done
+run_collector --dynamic-only >"$SNAPSHOT"
+assert_jq "$SNAPSHOT" '.gpus | length == 32' "GPU result and enumeration count are capped"
+assert_jq "$SNAPSHOT" '.gpus | all(.name | utf8bytelength <= 256)' "GPU names are capped before JSON assembly"
+for n in $(seq 2 41); do
+  hex=$(printf '%02x' "$n")
+  rm -rf "$FIXTURE_DIR/drm/card$n" "$FIXTURE_DIR/pci/0000:02:$hex.0"
+done
+
+# Make only the final dynamic jq producer flood stdout. The bounded emitter
+# must stop it at MAX+1 and return a small, valid fallback object.
+printf '%s\n' \
+  '#!/bin/bash' \
+  'for arg in "$@"; do' \
+  '  case "$arg" in' \
+  '    *"meta: { collectedAtMs:"*)' \
+  '      sleep 30 </dev/null >/dev/null 2>&1 &' \
+  '      child=$!' \
+  '      [ -n "${HELPER_PID_FILE:-}" ] && printf "%s\n" "$child" >"$HELPER_PID_FILE"' \
+  '      head -c 1048577 /dev/zero | tr '\''\0'\'' X' \
+  '      exit 0' \
+  '      ;;' \
+  '    *"{os: \$os, cpuName: \$cpuName}"*) head -c 1048577 /dev/zero | tr '\''\0'\'' X; exit 0 ;;' \
+  '  esac' \
+  'done' \
+  'exec /usr/bin/jq "$@"' \
+  >"$FIXTURE_DIR/bin/jq"
+chmod +x "$FIXTURE_DIR/bin/jq"
+FINAL_JSON_CHILD_PID="$FIXTURE_DIR/final-json-child.pid"
+HELPER_PID_FILE="$FINAL_JSON_CHILD_PID" run_collector --dynamic-only >"$SNAPSHOT"
+assert_jq "$SNAPSHOT" '.meta.warnings | any(contains("exceeded the size limit"))' "oversized final JSON becomes a valid fallback"
+assert_true "fallback JSON remains small" test "$(wc -c <"$SNAPSHOT")" -lt 1024
+assert_true "final JSON overflow kills and reaps the producer process group" \
+  pid_file_process_is_gone "$FINAL_JSON_CHILD_PID"
+run_collector --static-only >"$SNAPSHOT"
+assert_jq "$SNAPSHOT" '. == {"os":null,"cpuName":null}' "oversized static JSON becomes a valid fallback"
+rm -f "$FIXTURE_DIR/bin/jq"
+
+# Intermediate JSON producers use the same bounded process-group wrapper as
+# hardware helpers. A faulty jq must not fill a command substitution or leave
+# a forked descendant alive before the final JSON gate is reached.
+printf '%s\n' \
+  '#!/bin/bash' \
+  'case "$*" in' \
+  '  *"CPU Fan"*)' \
+  '    sleep 30 </dev/null >/dev/null 2>&1 &' \
+  '    child=$!' \
+  '    [ -n "${HELPER_PID_FILE:-}" ] && printf "%s\n" "$child" >"$HELPER_PID_FILE"' \
+  '    head -c 65537 /dev/zero | tr '\''\0'\'' J' \
+  '    exit 0' \
+  '    ;;' \
+  'esac' \
+  'exec /usr/bin/jq "$@"' \
+  >"$FIXTURE_DIR/bin/jq"
+chmod +x "$FIXTURE_DIR/bin/jq"
+JSON_CHILD_PID="$FIXTURE_DIR/json-child.pid"
+HELPER_PID_FILE="$JSON_CHILD_PID" run_collector --dynamic-only >"$SNAPSHOT"
+assert_jq "$SNAPSHOT" 'type == "object" and (.fans | type == "array")' \
+  "intermediate JSON overflow still yields a valid bounded snapshot"
+assert_true "intermediate JSON overflow kills and reaps the producer process group" \
+  pid_file_process_is_gone "$JSON_CHILD_PID"
+rm -f "$FIXTURE_DIR/bin/jq"
+
+# `timeout` bounds the optional hardware helpers, but the collector must still
+# produce a real snapshot without it: only those helpers are skipped, never the
+# /proc and /sys derived CPU, temperature, and memory data. Guards against the
+# bounded-JSON emitter routing its own jq through the helper-only wrapper,
+# which would turn a missing `timeout` into an entirely empty panel.
+NOTIMEOUT_BIN="$FIXTURE_DIR/notimeout"
+mkdir -p "$NOTIMEOUT_BIN"
+for tool in bash jq awk sed find sort head wc cat basename dirname readlink \
+  date nproc mktemp mkfifo rmdir rm tr; do
+  for dir in /usr/bin /bin; do
+    if [ -x "$dir/$tool" ]; then
+      ln -sf "$dir/$tool" "$NOTIMEOUT_BIN/$tool"
+      break
+    fi
+  done
+done
+
+assert_true "fixture PATH without timeout really lacks it" \
+  test -z "$(PATH="$FIXTURE_DIR/bin:$NOTIMEOUT_BIN" command -v timeout || true)"
+
+PATH_OVERRIDE="$FIXTURE_DIR/bin:$NOTIMEOUT_BIN" run_collector --dynamic-only >"$SNAPSHOT"
+assert_jq "$SNAPSHOT" '.memory.totalKB == 33554432 and .cpu.tempC == 55 and .cpu.coreCount > 0' \
+  "missing timeout still yields real CPU and memory data"
+assert_jq "$SNAPSHOT" '.meta.warnings | all(contains("generation failed") | not)' \
+  "missing timeout does not discard the whole snapshot"
+
+# Without GNU timeout, Bash job control supplies the local producer group.
+# Keep this path covered so the byte cap cannot accidentally move a faulty
+# local producer outside the outer collector session/watchdog.
+printf '%s\n' \
+  '#!/bin/bash' \
+  'case "$*" in' \
+  '  *"CPU Fan"*)' \
+  '    /usr/bin/sleep 30 </dev/null >/dev/null 2>&1 &' \
+  '    child=$!' \
+  '    [ -n "${HELPER_PID_FILE:-}" ] && printf "%s\n" "$child" >"$HELPER_PID_FILE"' \
+  '    /usr/bin/head -c 65537 /dev/zero | /usr/bin/tr '\''\0'\'' M' \
+  '    exit 0' \
+  '    ;;' \
+  'esac' \
+  'exec /usr/bin/jq "$@"' \
+  >"$FIXTURE_DIR/bin/jq"
+chmod +x "$FIXTURE_DIR/bin/jq"
+NOTIMEOUT_CHILD_PID="$FIXTURE_DIR/notimeout-child.pid"
+PATH_OVERRIDE="$FIXTURE_DIR/bin:$NOTIMEOUT_BIN" HELPER_PID_FILE="$NOTIMEOUT_CHILD_PID" \
+  run_collector --dynamic-only >"$SNAPSHOT"
+assert_jq "$SNAPSHOT" 'type == "object" and (.fans | type == "array")' \
+  "missing-timeout local overflow still yields valid JSON"
+assert_true "missing-timeout local overflow kills and reaps its process group" \
+  pid_file_process_is_gone "$NOTIMEOUT_CHILD_PID"
+rm -f "$FIXTURE_DIR/bin/jq"
+
+PATH_OVERRIDE="$FIXTURE_DIR/bin:$NOTIMEOUT_BIN" run_collector --static-only >"$SNAPSHOT"
+assert_jq "$SNAPSHOT" '.cpuName == "AMD Ryzen 9 5900HX with Radeon Graphics"' \
+  "missing timeout still yields static metadata"
 
 if [ "$failures" -gt 0 ]; then
   printf '\n%s collector test(s) failed\n' "$failures" >&2
